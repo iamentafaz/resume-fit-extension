@@ -5,7 +5,8 @@ const DEFAULT_SETTINGS = {
   timeoutSec: 120
 };
 
-const MAX_OUTPUT_TOKENS = 700; // keeps generation bounded so slow/local models still return in reasonable time
+const MAX_OUTPUT_TOKENS = 700;
+const MAX_RETRY_ATTEMPTS = 1; // one retry with a fix-up prompt
 
 let currentController = null;
 
@@ -14,7 +15,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleAnalyze(msg.tabId)
       .then(sendResponse)
       .catch((err) => sendResponse({ error: err.message }));
-    return true; // keep the message channel open for the async response
+    return true;
   }
   if (msg.type === 'TEST_CONNECTION') {
     testConnection(msg.settings)
@@ -27,6 +28,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return true;
   }
+  if (msg.type === 'DELETE_HISTORY_ITEM') {
+    deleteHistoryItem(msg.url)
+      .then(sendResponse)
+      .catch((err) => sendResponse({ error: err.message }));
+    return true;
+  }
+  if (msg.type === 'CLEAR_HISTORY') {
+    chrome.storage.local.set({ history: {} }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
 });
 
 async function getSettings() {
@@ -34,75 +45,48 @@ async function getSettings() {
   return { ...DEFAULT_SETTINGS, ...stored };
 }
 
-// Injected into the active page — runs in page context, not extension context.
-function extractJDFromPage() {
-  function fromJsonLd() {
-    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-    for (const s of scripts) {
-      try {
-        const data = JSON.parse(s.textContent);
-        const items = Array.isArray(data) ? data : [data];
-        for (const item of items) {
-          const type = item['@type'];
-          const isJobPosting = type === 'JobPosting' || (Array.isArray(type) && type.includes('JobPosting'));
-          if (isJobPosting) {
-            const title = item.title || '';
-            const desc = item.description || '';
-            const plain = String(desc).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-            return { title, text: plain, source: 'json-ld' };
-          }
-        }
-      } catch (e) {
-        // not valid JSON-LD, skip
-      }
-    }
-    return null;
-  }
-
-  function fromHeuristic() {
-    const candidates = Array.from(document.querySelectorAll('main, article, [role="main"]'));
-    let best = null;
-    let bestLen = 0;
-    for (const el of candidates) {
-      const len = (el.innerText || '').length;
-      if (len > bestLen) {
-        bestLen = len;
-        best = el;
-      }
-    }
-    const el = best || document.body;
-    return { title: document.title, text: (el.innerText || '').replace(/\s+/g, ' ').trim(), source: 'heuristic' };
-  }
-
-  const jsonLd = fromJsonLd();
-  if (jsonLd && jsonLd.text.length > 200) return jsonLd;
-
-  const selection = window.getSelection ? window.getSelection().toString().trim() : '';
-  if (selection.length > 200) return { title: document.title, text: selection, source: 'selection' };
-
-  return fromHeuristic();
+async function deleteHistoryItem(url) {
+  const { history = {} } = await chrome.storage.local.get(['history']);
+  delete history[url];
+  await chrome.storage.local.set({ history });
+  return { ok: true };
 }
 
 async function handleAnalyze(tabId) {
-  const [{ result: jd }] = await chrome.scripting.executeScript({
+  const injectionResults = await chrome.scripting.executeScript({
     target: { tabId },
-    func: extractJDFromPage
+    files: ['content-script.js']
   });
 
-  if (!jd || !jd.text || jd.text.length < 50) {
-    return { error: 'Could not find a job description on this page. Try selecting the JD text and re-running.' };
+  const jdResult = injectionResults?.[0]?.result;
+
+  if (!jdResult || !jdResult.text || jdResult.text.length < 50) {
+    return {
+      error:
+        'Could not find a job description on this page. Try selecting the JD text and re-running.'
+    };
   }
 
-  const { resume } = await chrome.storage.local.get(['resume']);
-  if (!resume || resume.trim().length < 20) {
+  const { resume, activeResumeId = 'default', resumes = {} } =
+    await chrome.storage.local.get(['resume', 'activeResumeId', 'resumes']);
+
+  // Support both legacy single-resume and new multi-resume storage
+  let resumeText = '';
+  if (Object.keys(resumes).length > 0 && resumes[activeResumeId]) {
+    resumeText = resumes[activeResumeId].text;
+  } else if (resume) {
+    resumeText = resume;
+  }
+
+  if (!resumeText || resumeText.trim().length < 20) {
     return { error: 'No resume saved yet. Add it in the Resume tab first.' };
   }
 
   const settings = await getSettings();
-  const result = await callLocalLLM(settings, jd.text, resume);
+  const result = await callLocalLLMWithRetry(settings, jdResult.text, resumeText);
 
   const tab = await chrome.tabs.get(tabId);
-  const record = { ...result, jdTitle: jd.title, url: tab.url, timestamp: Date.now() };
+  const record = { ...result, jdTitle: jdResult.title, url: tab.url, timestamp: Date.now() };
 
   const { history = {} } = await chrome.storage.local.get(['history']);
   history[tab.url] = record;
@@ -126,6 +110,10 @@ Be honest about gaps rather than generous. Keep each list to 3-6 items. Do not i
   return { system, user };
 }
 
+function buildRetryPrompt(originalResponse) {
+  return `Your previous response was not valid JSON. Here is what you returned:\n\n${originalResponse.slice(0, 2000)}\n\nPlease return ONLY a valid JSON object with these fields: score (integer 0-100), verdict (string), matches (array of strings), gaps (array of strings), suggestions (array of strings). No markdown, no commentary, just the JSON.`;
+}
+
 function extractJson(text) {
   if (!text) return null;
   try {
@@ -144,27 +132,45 @@ function extractJson(text) {
   return null;
 }
 
-async function callLocalLLM(settings, jdText, resumeText) {
+async function callLocalLLMWithRetry(settings, jdText, resumeText) {
   const { system, user } = buildPrompt(jdText, resumeText);
+  const messages = [
+    { role: 'system', content: system },
+    { role: 'user', content: user }
+  ];
+
+  const rawContent = await callLocalLLM(settings, messages);
+  const parsed = extractJson(rawContent || '');
+  if (parsed) return parsed;
+
+  // Retry: ask the model to fix its output
+  messages.push({ role: 'assistant', content: rawContent || '' });
+  messages.push({ role: 'user', content: buildRetryPrompt(rawContent || '') });
+
+  const retryContent = await callLocalLLM(settings, messages);
+  const retryParsed = extractJson(retryContent || '');
+  if (retryParsed) return retryParsed;
+
+  throw new Error(
+    'The model responded but not with valid JSON even after a retry. Try a different model, lower the temperature, or re-run — smaller local models are less consistent at following format instructions.'
+  );
+}
+
+async function callLocalLLM(settings, messages) {
   const isOpenAiStyle = settings.apiStyle === 'openai';
 
   const body = isOpenAiStyle
     ? {
         model: settings.model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user }
-        ],
+        messages,
         temperature: 0.2,
-        max_tokens: MAX_OUTPUT_TOKENS
+        max_tokens: MAX_OUTPUT_TOKENS,
+        stream: true
       }
     : {
         model: settings.model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user }
-        ],
-        stream: false,
+        messages,
+        stream: true,
         options: { temperature: 0.2, num_predict: MAX_OUTPUT_TOKENS }
       };
 
@@ -182,33 +188,86 @@ async function callLocalLLM(settings, jdText, resumeText) {
       signal: controller.signal
     });
   } catch (e) {
+    clearTimeout(timeoutId);
+    currentController = null;
     if (e.name === 'AbortError') {
       throw new Error(
         `The local model didn't respond within ${timeoutMs / 1000}s. It may still be loading into memory, or your hardware is too slow for this prompt length. Try again (the model may already be warm), pick a smaller/faster model, or raise the timeout in Settings.`
       );
     }
-    throw new Error(`Couldn't reach ${settings.endpoint}. Is your local LLM server running, and does it allow requests from this extension (CORS)?`);
+    throw new Error(
+      `Couldn't reach ${settings.endpoint}. Is your local LLM server running, and does it allow requests from this extension (CORS)?`
+    );
+  }
+
+  if (!res.ok) {
+    currentController = null;
+    const bodyText = await res.text().catch(() => '');
+    throw new Error(
+      `Local LLM server returned ${res.status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}. Check the model name and endpoint in Settings.`
+    );
+  }
+
+  // Stream the response
+  let fullContent = '';
+  try {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+
+        const jsonStr = trimmed.startsWith('data: ') ? trimmed.slice(6) : trimmed;
+        try {
+          const chunk = JSON.parse(jsonStr);
+          const token = isOpenAiStyle
+            ? chunk?.choices?.[0]?.delta?.content || ''
+            : chunk?.message?.content || '';
+          fullContent += token;
+
+          // Notify popup of streaming progress
+          chrome.runtime.sendMessage({ type: 'STREAM_TOKEN', content: fullContent }).catch(() => {});
+        } catch (e) {
+          // not a JSON line (e.g. empty line), skip
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('Analysis was cancelled.');
+    }
+    throw e;
   } finally {
     clearTimeout(timeoutId);
     currentController = null;
   }
 
-  if (!res.ok) {
-    const bodyText = await res.text().catch(() => '');
-    throw new Error(`Local LLM server returned ${res.status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ''}. Check the model name and endpoint in Settings.`);
+  // For Ollama: if streaming produced no content, the response may have been
+  // non-streaming after all (some older Ollama versions). Fall back to reading
+  // the full body, but since we already consumed the stream, fullContent should
+  // have the data. If empty, it means the model returned nothing.
+  if (!fullContent.trim()) {
+    throw new Error('The model returned an empty response. Try a different model or re-run.');
   }
 
-  const data = await res.json();
-  const content = isOpenAiStyle ? data?.choices?.[0]?.message?.content : data?.message?.content;
-
-  const parsed = extractJson(content || '');
-  if (!parsed) {
-    throw new Error('The model responded but not with valid JSON. Try a different model, lower the temperature, or re-run — smaller local models are less consistent at following format instructions.');
-  }
-  return parsed;
+  return fullContent;
 }
 
 async function testConnection(settings) {
-  await callLocalLLM(settings, 'Test job description: requires basic communication skills.', 'Test resume: has basic communication skills.');
+  const messages = [
+    { role: 'system', content: 'Respond with exactly: {"ok":true}' },
+    { role: 'user', content: 'Test' }
+  ];
+  await callLocalLLM(settings, messages);
   return { ok: true };
 }
