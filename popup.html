@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fit Check</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <span class="brand-name">Fit Check</span>
+    </div>
+    <button class="icon-btn" id="settingsShortcut" title="Settings" aria-label="Open settings">
+      <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16">
+        <path d="M8.325 2.317a1 1 0 0 1 1.35-.936l.29.106a1 1 0 0 0 1.07-.24l.21-.21a1 1 0 0 1 1.415 0l.212.212a1 1 0 0 0 1.07.24l.29-.106a1 1 0 0 1 1.35.936v.3a1 1 0 0 0 .5.866l.26.15a1 1 0 0 1 .366 1.366l-.15.26a1 1 0 0 0 0 1l.15.26a1 1 0 0 1-.366 1.366l-.26.15a1 1 0 0 0-.5.866v.3a1 1 0 0 1-1.35.936l-.29-.106a1 1 0 0 0-1.07.24l-.212.212a1 1 0 0 1-1.415 0l-.21-.21a1 1 0 0 0-1.07-.24l-.29.106a1 1 0 0 1-1.35-.936v-.3a1 1 0 0 0-.5-.866l-.26-.15a1 1 0 0 1-.366-1.366l.15-.26a1 1 0 0 0 0-1l-.15-.26a1 1 0 0 1 .366-1.366l.26-.15a1 1 0 0 0 .5-.866zM10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5"/>
+      </svg>
+    </button>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="analyze" role="tab">Analyze</button>
+    <button class="tab" data-tab="resume" role="tab">Resume</button>
+    <button class="tab" data-tab="settings" role="tab">Settings</button>
+  </nav>
+
+  <main>
+
+    <section class="panel active" id="panel-analyze">
+      <button class="primary-btn" id="analyzeBtn">Analyze this page</button>
+      <p class="hint" id="analyzeHint">Open a job posting in this tab, then click Analyze.</p>
+
+      <div id="loadingState" class="loading hidden">
+        <div class="loading-row">
+          <div class="spinner"></div>
+          <div class="loading-text">
+            <span id="loadingMessage">Reading the page and asking your local model…</span>
+            <span class="loading-elapsed" id="loadingElapsed"></span>
+          </div>
+        </div>
+        <button type="button" class="text-btn" id="cancelBtn">Cancel</button>
+      </div>
+
+      <div id="errorState" class="error hidden"></div>
+
+      <div id="resultState" class="result hidden">
+        <div class="score-row">
+          <svg class="gauge" viewBox="0 0 120 120">
+            <circle cx="60" cy="60" r="52" class="gauge-track"></circle>
+            <circle cx="60" cy="60" r="52" class="gauge-fill" id="gaugeFill"></circle>
+            <text x="60" y="58" class="gauge-score" id="gaugeScore" text-anchor="middle">--</text>
+            <text x="60" y="76" class="gauge-label" text-anchor="middle">/ 100</text>
+          </svg>
+          <div class="verdict-block">
+            <span class="verdict-pill" id="verdictPill">--</span>
+            <span class="jd-title" id="jdTitle"></span>
+          </div>
+        </div>
+
+        <div class="list-block">
+          <h3><span class="dot dot-match"></span>Matched strengths</h3>
+          <ul id="matchesList"></ul>
+        </div>
+        <div class="list-block">
+          <h3><span class="dot dot-gap"></span>Gaps to address</h3>
+          <ul id="gapsList"></ul>
+        </div>
+        <div class="list-block">
+          <h3><span class="dot dot-suggest"></span>Tailoring suggestions</h3>
+          <ul id="suggestionsList"></ul>
+        </div>
+        <p class="timestamp" id="timestamp"></p>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-resume">
+      <label class="field-label" for="resumeText">Your resume (plain text)</label>
+      <textarea id="resumeText" placeholder="Paste your resume text here — the extension keeps it local and reuses it for every analysis."></textarea>
+      <div class="row-actions">
+        <span class="save-status" id="resumeSaveStatus"></span>
+        <button class="secondary-btn" id="saveResumeBtn">Save resume</button>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-settings">
+      <label class="field-label" for="apiStyle">API style</label>
+      <select id="apiStyle">
+        <option value="ollama">Ollama (/api/chat)</option>
+        <option value="openai">OpenAI-compatible (LM Studio, llama.cpp)</option>
+      </select>
+
+      <label class="field-label" for="endpoint">Endpoint URL</label>
+      <input type="text" id="endpoint" placeholder="http://localhost:11434/api/chat">
+
+      <label class="field-label" for="model">Model name</label>
+      <input type="text" id="model" placeholder="llama3">
+
+      <label class="field-label" for="timeoutSec">Response timeout (seconds)</label>
+      <input type="text" id="timeoutSec" placeholder="120">
+      <p class="hint">Local, CPU-run models can take a while, especially the first call after the model loads. Raise this if you're seeing timeout errors on a slow machine; lower it to fail fast instead of waiting.</p>
+
+      <div class="row-actions">
+        <span class="save-status" id="settingsSaveStatus"></span>
+        <button class="secondary-btn" id="testConnectionBtn">Test connection</button>
+        <button class="primary-btn" id="saveSettingsBtn">Save</button>
+      </div>
+      <p class="hint">If the test fails, make sure your local server is running and allows requests from this extension (CORS) — see the README.</p>
+    </section>
+
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
