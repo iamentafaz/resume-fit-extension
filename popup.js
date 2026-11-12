@@ -1,3 +1,7 @@
+import * as pdfjsLib from './vendor/pdf.min.mjs';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('vendor/pdf.worker.min.mjs');
+
 const GAUGE_CIRCUMFERENCE = 326.7;
 
 const el = {
@@ -43,6 +47,9 @@ const el = {
   endpoint: document.getElementById('endpoint'),
   endpointError: document.getElementById('endpointError'),
   model: document.getElementById('model'),
+  ollamaModels: document.getElementById('ollamaModels'),
+  modelListStatus: document.getElementById('modelListStatus'),
+  refreshModelsBtn: document.getElementById('refreshModelsBtn'),
   timeoutSec: document.getElementById('timeoutSec'),
   saveSettingsBtn: document.getElementById('saveSettingsBtn'),
   testConnectionBtn: document.getElementById('testConnectionBtn'),
@@ -406,29 +413,67 @@ el.saveResumeBtn.addEventListener('click', async () => {
 
 // ── Resume file upload ──
 
-el.resumeFileInput.addEventListener('change', (e) => {
+el.resumeFileInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    el.resumeText.value = reader.result;
-    el.resumeSaveStatus.textContent = 'File loaded — click Save';
+  el.resumeSaveStatus.textContent = file.name.toLowerCase().endsWith('.pdf')
+    ? 'Extracting PDF text…'
+    : 'Loading file…';
+  el.resumeSaveStatus.style.color = 'var(--text-muted)';
+  el.resumeFileInput.disabled = true;
+  try {
+    let text;
+    if (file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf') {
+      text = await extractPdfText(file);
+      if (!text.trim()) {
+        throw new Error('No selectable text was found. This may be a scanned PDF; OCR is not supported yet.');
+      }
+    } else {
+      text = await file.text();
+    }
+    el.resumeText.value = text.trim();
+    el.resumeSaveStatus.textContent = 'File loaded — click Save resume';
     el.resumeSaveStatus.style.color = 'var(--warn)';
-    setTimeout(() => {
-      el.resumeSaveStatus.textContent = '';
-      el.resumeSaveStatus.style.color = '';
-    }, 3000);
-  };
-  reader.readAsText(file);
-  e.target.value = ''; // reset so same file can be re-selected
+  } catch (error) {
+    el.resumeSaveStatus.textContent = error.message || 'Could not read this file.';
+    el.resumeSaveStatus.style.color = 'var(--bad)';
+  } finally {
+    el.resumeFileInput.disabled = false;
+    e.target.value = ''; // reset so same file can be re-selected
+  }
 });
+
+async function extractPdfText(file) {
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(await file.arrayBuffer()),
+    isEvalSupported: false
+  });
+  try {
+    const pdf = await loadingTask.promise;
+    const pages = [];
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      let pageText = '';
+      for (const item of content.items) {
+        if (!('str' in item)) continue;
+        pageText += item.str;
+        pageText += item.hasEOL ? '\n' : ' ';
+      }
+      pages.push(pageText);
+    }
+    return pages.join('\n\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n');
+  } finally {
+    await loadingTask.destroy();
+  }
+}
 
 // ── Settings ──
 
 async function loadSettings() {
   const {
     endpoint = 'http://localhost:11434/api/chat',
-    model = 'llama3',
+    model = '',
     apiStyle = 'ollama',
     timeoutSec = 120
   } = await chrome.storage.local.get(['endpoint', 'model', 'apiStyle', 'timeoutSec']);
@@ -436,6 +481,42 @@ async function loadSettings() {
   el.model.value = model;
   el.apiStyle.value = apiStyle;
   el.timeoutSec.value = timeoutSec;
+  if (apiStyle === 'ollama') await loadOllamaModels({ savedModel: model, autoSelect: true });
+}
+
+async function loadOllamaModels({ savedModel = el.model.value.trim(), autoSelect = false } = {}) {
+  if (el.apiStyle.value !== 'ollama') return;
+  el.modelListStatus.textContent = 'Loading models from Ollama…';
+  el.modelListStatus.style.color = 'var(--text-muted)';
+  el.refreshModelsBtn.disabled = true;
+  try {
+    const endpoint = new URL(el.endpoint.value.trim() || 'http://localhost:11434/api/chat');
+    endpoint.pathname = endpoint.pathname.replace(/\/api\/chat\/?$/, '/api/tags');
+    if (!endpoint.pathname.endsWith('/api/tags')) endpoint.pathname = '/api/tags';
+    endpoint.search = '';
+    const response = await fetch(endpoint.toString());
+    if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
+    const data = await response.json();
+    const models = (data.models || []).map((item) => item.name).filter(Boolean);
+    el.ollamaModels.replaceChildren(...models.map((name) => {
+      const option = document.createElement('option');
+      option.value = name;
+      return option;
+    }));
+    if (!models.length) {
+      el.modelListStatus.textContent = 'No Ollama models found. Pull a model, then load again.';
+      return;
+    }
+    const selected = models.includes(savedModel) ? savedModel : models[0];
+    if (autoSelect || !models.includes(el.model.value.trim())) el.model.value = selected;
+    if (autoSelect && selected !== savedModel) await chrome.storage.local.set({ model: selected });
+    el.modelListStatus.textContent = `${models.length} model${models.length === 1 ? '' : 's'} available`;
+  } catch (error) {
+    el.modelListStatus.textContent = `Could not load models: ${error.message}`;
+    el.modelListStatus.style.color = 'var(--bad)';
+  } finally {
+    el.refreshModelsBtn.disabled = false;
+  }
 }
 
 el.apiStyle.addEventListener('change', () => {
@@ -445,7 +526,10 @@ el.apiStyle.addEventListener('change', () => {
   if (el.apiStyle.value === 'ollama' && el.endpoint.value.includes('1234')) {
     el.endpoint.value = 'http://localhost:11434/api/chat';
   }
+  if (el.apiStyle.value === 'ollama') loadOllamaModels();
 });
+
+el.refreshModelsBtn.addEventListener('click', () => loadOllamaModels());
 
 function isValidEndpoint(url) {
   try {

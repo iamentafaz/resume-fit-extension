@@ -1,6 +1,6 @@
 const DEFAULT_SETTINGS = {
   endpoint: 'http://localhost:11434/api/chat',
-  model: 'llama3',
+  model: '',
   apiStyle: 'ollama', // 'ollama' | 'openai'
   timeoutSec: 120
 };

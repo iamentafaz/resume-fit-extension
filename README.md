@@ -7,7 +7,7 @@ A privacy-first browser extension that scores how well your resume fits the job 
 - **Fit scoring** — get a 0-100 score with matched strengths, gaps, and tailoring suggestions
 - **Smart JD extraction** — dedicated selectors for LinkedIn, Indeed, Greenhouse, Lever, Workday, Glassdoor, Wellfound, and Ashby, plus JSON-LD and heuristic fallbacks
 - **Multiple resumes** — save and switch between named resumes (e.g. one per role type)
-- **Resume file upload** — load a `.txt` file instead of pasting manually
+- **Resume file upload** — load a `.txt` file or extract selectable text from a `.pdf` locally
 - **Analysis history** — revisit past analyses from the History tab; delete individual entries or clear all
 - **Copy results** — one-click copy of the analysis as formatted text
 - **Streaming responses** — see the LLM output as it generates, instead of waiting for the full response
@@ -24,7 +24,7 @@ A privacy-first browser extension that scores how well your resume fits the job 
 
 ## One-time setup
 
-**1. Add your resume.** Click the extension icon → Resume tab → paste your resume (or upload a `.txt` file) → Save. You can create multiple resumes with the **+** button and switch between them from the dropdown.
+**1. Add your resume.** Click the extension icon → Resume tab → paste your resume (or upload a `.txt` or text-based `.pdf` file) → Save. PDF text is extracted locally in the extension. Scanned PDFs need OCR and are not supported. You can create multiple resumes with the **+** button and switch between them from the dropdown.
 
 **2. Point it at your local LLM.** Click the extension icon → Settings tab:
 - Pick **Ollama** or **OpenAI-compatible** (LM Studio, llama.cpp server) depending on what you run.
